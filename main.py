@@ -1,102 +1,90 @@
 ### BOSE EINSTEIN CONDENSATE LATTICE BOLTZMANN SIMULATION
-## CONDENSATE SHALL BE 2D, BUT ALMOST 1D
-## THERE MUST BE TWO ELECTROMAGNETIC FIELDS AS SUPPORT, X WEAKER THAN Y SO ITS NOT A SPHERE
-## PARTICLES SHALL HAVE BOSE-EINSTEIN DISTRIBUTION AS EQUILIBRIUM AND RELATIVELY LOW KINETIC ENERGY,
-#  SIMULATING THEY HAVE ALREADY BEEN COOLED DOWN WITH LIQUID HELIUM
-## STILL, PARTICLES WITH ENERGY ABOVE A THRESHOLD MUST BE TRAPPED OUT THE SYSTEM ONCE THEY TRAVEL TOO FAR,
-#  SIMULATING QUANTUM COOLING
-## LASER COOLING WILL BE IMPLEMENTED THROUGH A "BRUTE FORCE" DEACCELERATION
+## ALMOST 1D BUT 2D CONDENSATE
+## TWO ELECTROMAGNETIC FIELDS AS SUPPORT, X WEAKER THAN Y SO ITS NOT A SPHERE
+## BOSE-EINSTEIN DISTRIBUTION AS EQUILIBRIUM AND RELATIVELY LOW KINETIC ENERGY TO SIMULATE LIQUID HELIUM COOLING
+## PARTICLES WITH ENERGY ABOVE A THRESHOLD MUST BE TRAPPED OUT THE SYSTEM ONCE THEY TRAVEL TOO FAR, LOWERING AVERAGE TEMPERATURE (just like coffee)
+## "BRUTE FORCE" DEACCELERATION TO SIMULATE LASER COOLING
 ## MULTICORE PARALLELISM WILL BE WORKED OUT
 
-import datetime
-
+import datetime, multiprocessing as mp, numpy as np, matplotlib.pyplot as plt
 
 a = datetime.datetime.now()
 
-n = (11,11)
-#                6       2      5         3      o      1         7       4       8
-velocities = [[[-1,1], [0,1], [1,1]], [[-1,0], [0,0], [1,0]], [[-1,-1], [0,-1], [1,-1]]]
-weights = [[1/36,1/9,1/36],[1/9,1/4,1/9],[1/36,1/9,1/36]]
-dx = dy = dt = 1
-iterations = 10
-omega = 1/2.25
+n = (125,125)
+velocities = [[0,0], [1,0], [0,1], [-1,0], [0,-1], [1,1], [-1,1], [-1,-1], [1,-1]]
+weights = [4/9,1/9,1/9,1/9,1/9,1/36,1/36,1/36,1/36]
+iterations = 100
+omega = 1/.8
+squared_sound_speed = 1/3 # standard for D2Q9
 
-elements = [[velocities[:] for j in range(n[0])] for i in range(n[1])]
-elements[(n[0]-1)//2][(n[1]-1)//2] = [[[-1/36,1/36], [0,1/9], [1/36,1/36]], [[-1/9,0], [0,0], [1/9,0]], [[-1/36,-1/36], [0,-1/9], [1/36,-1/36]]]
-updated_elements = [[[[[0]*2]*3]*3 for j in range(n[0])] for i in range(n[1])]
+elements = [[[1,0,0,0,0,0,0,0,0] for j in range(n[1])] for i in range(n[0])] # all lattice start with only n_0
+updated_elements = [[[0,0,0,0,0,0,0,0,0] for j in range(n[1])] for i in range(n[0])] # for collisions
+density = [[1 for j in range(n[1])] for i in range(n[0])]
+macroscopic_velocity = [[[0,0] for j in range(n[1])] for i in range(n[0])]
 
-feqs = [[[[[0]*2]*3]*3 for j in range(n[0])] for i in range(n[1])]
-feqs[(n[0]-1)//2][(n[1]-1)//2] = [[[-1/36,1/36], [0,1/9], [1/36,1/36]], [[-1/9,0], [0,0], [1/9,0]], [[-1/36,-1/36], [0,-1/9], [1/36,-1/36]]]
+def dot(vector1, vector2):
+    return vector1[0]*vector2[0] + vector1[1]*vector2[1]
 
-def mod(vector):
-    return (vector[0]**2 + vector[1]**2)**(0.5)
+def collide(y, x):
+    for c in range(9):
+        d = dot(macroscopic_velocity[y][x], velocities[c])
+        taylor = 1 + d/squared_sound_speed + (d**2)/(2*(squared_sound_speed**2)) - dot(macroscopic_velocity[y][x], macroscopic_velocity[y][x])/(2*squared_sound_speed)
+        feq = weights[c]*density[y][x]*taylor # maxwell-boltzmann distribution (to be replaced soon)
+        updated_elements[y][x][c] = (1-omega)*elements[y][x][c] + omega*feq # BGK approximation
 
-def collide(x, y):
-    for g in range(3):
-        for c in range(3):
-            updated_elements[x][y][g][c][0] = (1-omega)*elements[x][y][g][c][0] + omega*feqs[x][y][g][c][0]
-            updated_elements[x][y][g][c][1] = (1-omega)*elements[x][y][g][c][1] + omega*feqs[x][y][g][c][1]
+def stream(y, x):
+    for c in range(9):
+        target = [x+velocities[c][0], y-velocities[c][1]] # next lattice
 
-def stream(x, y): # OH BOY
-    elements[x][y][1][1] = updated_elements[x][y][1][1] #f0
-    elements[x][y+dy if y < n[1]-1 else y][1][2] = updated_elements[x][y][1][2] #f1
-    elements[x-dx if x > 0 else x][y][0][1] = updated_elements[x][y][0][1] #f2
-    elements[x][y-dy if y > 0 else y][1][0] = updated_elements[x][y][1][0] #f3
-    elements[x+dx if x < n[0]-1 else x][y][2][1] = updated_elements[x][y][2][1] #f4
-    elements[x-dx if x > 0 else x][y+dy if y < n[1]-1 else y][0][2] = updated_elements[x][y][0][2] #f5
-    elements[x-dx if x > 0 else x][y-dy if y > 0 else y][0][0] = updated_elements[x][y][0][0] #f6
-    elements[x+dx if x < n[0]-1 else x][y-dy if y > 0 else y][2][0] = updated_elements[x][y][2][0] #f7
-    elements[x+dx if x < n[0]-1 else x][y+dy if y < n[1]-1 else y][2][2] = updated_elements[x][y][2][2] #f8
-    # NO BB RIGHT NOW
+        # periodic boundary condition (to become bounce-back soon)
+        if target[0] < 0: target[0] = n[0]-1
+        elif target[0] > n[0]-1: target[0] = 0
+        if target[1] < 0: target[1] = n[1]-1
+        elif target[1] > n[1]-1: target[1] = 0
+
+        elements[target[1]][target[0]][c] = updated_elements[y][x][c]
     
-
-def measure(x, y):
-    temp = sum(map(lambda x: mod(x), [*[_ for _ in [*elements[x][y][0]]], *[_ for _ in [*elements[x][y][1]]], *[_ for _ in [*elements[x][y][2]]]]))
-    #feqs[x][y] = [[weights[i][j]*temp for j in range(3)] for i in range(3)]
-    feqs[x][y] = [[[(-1/36)*temp,(1/36)*temp], [0,(1/9)*temp], [(1/36)*temp,(1/36)*temp]], [[(-1/9)*temp,0], [0,0], [(1/9)*temp,0]], [[(-1/36)*temp,(-1/36)*temp], [0,(-1/9)*temp], [(1/36)*temp,(-1/36)*temp]]]
-
-for _ in range(iterations):
-    print(f'collision #{_}')
-    for i in range(n[0]):
-        for j in range(n[1]): 
-            collide(i,j)
+def measure(y, x):
+    density[y][x] = sum(elements[y][x])
+    macroscopic_velocity[y][x][0] = sum([velocities[_][0]*elements[y][x][_] for _ in range(9)])/density[y][x]
+    macroscopic_velocity[y][x][1] = sum([velocities[_][1]*elements[y][x][_] for _ in range(9)])/density[y][x]
     
-    print(f'stream #{_}')
-    for i in range(n[0]):
-        for j in range(n[1]):
-            stream(i,j)
+# heatmap for density
+plt.ion()
+fig, ax = plt.subplots()
+img = plt.imshow(density, cmap='viridis')
+plt.colorbar(img)
+    
+def iterate():
+    density[(n[0]-1)//2][(n[1]-1)//2] = 5
 
-    for i in range(n[0]):
-        for j in range(n[1]): measure(i,j)
+    for _ in range(iterations):
+        if _ % 10 == 0:
+            print(f'total density: {sum(map(lambda x: sum(x), density))}')
+            print(f'max flow speed: {max(map(lambda x: dot(x,x)**(0.5), [a for b in macroscopic_velocity for a in b]))}')
 
+        for i in range(n[0]):
+            for j in range(n[1]): 
+                collide(i,j)
+        
+        for i in range(n[0]):
+            for j in range(n[1]):
+                stream(i,j)
 
-temperatures = [[sum(map(lambda x: mod(x), [*[_ for _ in [*elements[i][j][0]]], *[_ for _ in [*elements[i][j][1]]], *[_ for _ in [*elements[i][j][2]]]]))for j in range(n[1])] for i in range(n[0])]
+        for i in range(n[0]):
+            for j in range(n[1]):
+                measure(i,j)
 
-for i in range(n[0]):
-    print(temperatures[i])
+        # updating heatmap
+        img.set_data(density)
+        img.set_clim(vmin=min(min(density)), vmax=max(max(density)))
+        plt.draw()
+        plt.pause(0.01)
 
+iterate()
 c = datetime.datetime.now()
 
+plt.ioff()
+plt.show()
 
 print(c-a)
-
-
-'''             +
-  6  2  5    6  2  5    6  2  5
-  3  o  1    3  o  1    3  o  1
-  7  4  8    7  4  8    7  4  8
-
-  6  2  5    6  2  5    6  2  5
-- 3  o  1    3  o  1    3  o  1 +
-  7  4  8    7  4  8    7  4  8
-
-  6  2  5    6  2  5    6  2  5
-  3  o  1    3  o  1    3  o  1
-  7  4  8    7  4  8    7  4  8
-                -
-
-(1,1)
-
-
-
-'''
