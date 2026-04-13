@@ -11,73 +11,69 @@ import datetime, multiprocessing as mp, numpy as np, matplotlib.pyplot as plt
 a = datetime.datetime.now()
 
 n = (125,125)
-velocities = [[0,0], [1,0], [0,1], [-1,0], [0,-1], [1,1], [-1,1], [-1,-1], [1,-1]]
-weights = [4/9,1/9,1/9,1/9,1/9,1/36,1/36,1/36,1/36]
+velocities = np.array(((0,0), (1,0), (0,1), (-1,0), (0,-1), (1,1), (-1,1), (-1,-1), (1,-1)))
+weights = np.array((4/9,1/9,1/9,1/9,1/9,1/36,1/36,1/36,1/36))
 iterations = 100
 omega = 1/.8
 squared_sound_speed = 1/3 # standard for D2Q9
 
-elements = [[[1,0,0,0,0,0,0,0,0] for j in range(n[1])] for i in range(n[0])] # all lattice start with only n_0
-updated_elements = [[[0,0,0,0,0,0,0,0,0] for j in range(n[1])] for i in range(n[0])] # for collisions
-density = [[1 for j in range(n[1])] for i in range(n[0])]
-macroscopic_velocity = [[[0,0] for j in range(n[1])] for i in range(n[0])]
+elements = np.zeros((*n, 9)) # all lattice start with only n_0
+elements[:,:,0] = 1
+updated_elements = np.zeros_like(elements) # for collisions
 
-def dot(vector1, vector2):
-    return vector1[0]*vector2[0] + vector1[1]*vector2[1]
+density = np.ones(n)
+macroscopic_velocity = np.zeros((*n,2))
 
-def collide(y, x):
-    for c in range(9):
-        d = dot(macroscopic_velocity[y][x], velocities[c])
-        taylor = 1 + d/squared_sound_speed + (d**2)/(2*(squared_sound_speed**2)) - dot(macroscopic_velocity[y][x], macroscopic_velocity[y][x])/(2*squared_sound_speed)
-        feq = weights[c]*density[y][x]*taylor # maxwell-boltzmann distribution (to be replaced soon)
-        updated_elements[y][x][c] = (1-omega)*elements[y][x][c] + omega*feq # BGK approximation
+def collide():
+    global updated_elements
+    dotted_fv = np.einsum('ijk,lk->ijl', macroscopic_velocity, velocities) # matrix of c dot u
+    macro_norm = np.sum(macroscopic_velocity*macroscopic_velocity, axis=2) # matrix of |u|^2
 
-def stream(y, x):
-    for c in range(9):
-        target = [x+velocities[c][0], y-velocities[c][1]] # next lattice
+    # maxwell-boltzmann distribution (to be replaced soon)
+    taylor = 1 + dotted_fv/squared_sound_speed + (dotted_fv**2)/(2*(squared_sound_speed**2)) - (macro_norm/(2*squared_sound_speed))[:,:, np.newaxis]
+    feq = weights*taylor*density[:,:,np.newaxis] 
 
-        # periodic boundary condition (to become bounce-back soon)
-        if target[0] < 0: target[0] = n[0]-1
-        elif target[0] > n[0]-1: target[0] = 0
-        if target[1] < 0: target[1] = n[1]-1
-        elif target[1] > n[1]-1: target[1] = 0
+    updated_elements = (1-omega)*elements + omega*feq # BGK approximation
 
-        elements[target[1]][target[0]][c] = updated_elements[y][x][c]
+
+def stream(): # still have to vectorise this one
+    for x in range(n[0]):
+        for y in range(n[1]):
+            for c in range(9):
+                target = [x+velocities[c,0], y-velocities[c,1]] # next lattice, vertical has to be inverted because matrix indexing differs from cartesian indexing (above means line before)
+
+                # periodic boundary condition (electromagnetic fields will impose its own boundary condition soon)
+                if target[0] < 0: target[0] = n[0]-1
+                elif target[0] > n[0]-1: target[0] = 0
+                if target[1] < 0: target[1] = n[1]-1
+                elif target[1] > n[1]-1: target[1] = 0
+
+                elements[*target, c] = updated_elements[x,y,c]
     
-def measure(y, x):
-    density[y][x] = sum(elements[y][x])
-    macroscopic_velocity[y][x][0] = sum([velocities[_][0]*elements[y][x][_] for _ in range(9)])/density[y][x]
-    macroscopic_velocity[y][x][1] = sum([velocities[_][1]*elements[y][x][_] for _ in range(9)])/density[y][x]
+def measure():
+    global density, macroscopic_velocity
+    density = np.sum(elements, axis=2) # summatory over n from 1 to 9
+    macroscopic_velocity = np.einsum('ijk,kl->ijl', elements, velocities)/density[:,:,np.newaxis] # summatory over n*c from 1 to 9
     
 # heatmap for density
 plt.ion()
 fig, ax = plt.subplots()
-img = plt.imshow(density, cmap='viridis')
+img = plt.imshow(density, cmap='plasma')
 plt.colorbar(img)
     
 def iterate():
-    density[(n[0]-1)//2][(n[1]-1)//2] = 5
-
     for _ in range(iterations):
         if _ % 10 == 0:
-            print(f'total density: {sum(map(lambda x: sum(x), density))}')
-            print(f'max flow speed: {max(map(lambda x: dot(x,x)**(0.5), [a for b in macroscopic_velocity for a in b]))}')
+            print(f'total density: {np.sum(density)}')
+            print(f'max flow speed: {np.amax(np.sum(macroscopic_velocity*macroscopic_velocity, axis=2)**(.5))}')
 
-        for i in range(n[0]):
-            for j in range(n[1]): 
-                collide(i,j)
-        
-        for i in range(n[0]):
-            for j in range(n[1]):
-                stream(i,j)
-
-        for i in range(n[0]):
-            for j in range(n[1]):
-                measure(i,j)
+        collide()
+        stream()
+        measure()
 
         # updating heatmap
         img.set_data(density)
-        img.set_clim(vmin=min(min(density)), vmax=max(max(density)))
+        img.set_clim(vmin=np.amin(density), vmax=np.amax(density))
         plt.draw()
         plt.pause(0.01)
 

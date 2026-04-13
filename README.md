@@ -4,8 +4,8 @@
 <ul>
 <li>Multiprocess parallelism</li>
 <li>Switch Maxwell-Boltzmann distribution with Bose-Einstein distribution</li>
-<li>Vector field for visualizing macroscopic velocities</li>
-<li>Bounce-back</li>
+<li><del>Vector field for visualizing macroscopic velocities</del></li>
+<li><del>Bounce-back</del></li>
 <li>Numpy for matrices handling</li>
-<li>Laser cooling, particle trapping and electromagnetic fields</li>
+<li>Laser cooling, evaporative cooling and electromagnetic fields</li>
 </ul>
