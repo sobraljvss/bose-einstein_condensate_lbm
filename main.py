@@ -6,114 +6,68 @@
 ## "BRUTE FORCE" DEACCELERATION TO SIMULATE LASER COOLING
 ## MULTICORE PARALLELISM WILL BE WORKED OUT
 
-import datetime, multiprocessing as mp, numpy as np, matplotlib.pyplot as plt
+import numpy as np, matplotlib.pyplot as plt
 
-t0 = datetime.datetime.now() # recording startup time for optimization comparison
+a,b,N = 0,10,100 # interval and steps
+dx = (b-a)/N # step size
+n = 1/dx
+tolerance_nk = 10**-6 # tolerance
 
-n = (100,100) # matrix coordinates
+def f(laser_intensity=1, alpha=1, chemical_potential=1, particle_interation=1):
+    F_n = np.arange(a,b+dx,dx) # wavefunction
+    F_np = np.sin(np.arange(a,b+dx,dx)) # next iteration of wavefunction
 
-# system's middle point and distances relative to it, that is, the trap's dimensions (TODO: reinsert it into the code)
-mid = (n[0]//2,n[1]//2)
-var = (n[0]//10,n[1]//2)
+    # Newton-Kantorovich
+    while np.max(np.abs(F_np - F_n)) > tolerance_nk:
+        # ordinary differential equation produced by Frechét derivative
+        F_n = F_np.copy()
+        g = laser_intensity*np.cos(alpha*np.arange(a,b+dx,dx)) + chemical_potential - np.arange(a,b+dx,dx)**2 - 3*particle_interation*F_n**2
+        S = 2*particle_interation*F_n**3
 
-VELOCITIES = np.array(((0,0), (1,0), (0,1), (-1,0), (0,-1), (1,1), (-1,1), (-1,-1), (1,-1))) # in cartesian coordinates
-WEIGHTS = np.array((4/9,1/9,1/9,1/9,1/9,1/36,1/36,1/36,1/36))
-ITERATIONS = 100
-OMEGA = 1/.8 # time step over relaxation time
-SQUARED_SOUND_SPEED = 1/3 # standard for D2Q9
+        # Finite Differences
+        A = np.zeros((N+1,N+1))
+        B = np.zeros(N+1)
 
-elements = np.zeros((*n, 9)) # lattices with 9 distribution functions (f_i)
-elements[:,:,0] = 1 # all lattice start with only f_0 = 1
-updated_elements = np.zeros_like(elements) # for collisions
-is_fluid = np.full(n, True) # boolean matrix excluding trapped out particles (TODO: reinsert it into the code)
+        # initial condition: F(a) = 0
+        A[0,0] = 1
+        B[0] = 0
 
-density = np.ones(n)
-macroscopic_velocity = np.zeros((*n,2)) # in cartesian coordinates
-macro_norm = np.sum(macroscopic_velocity*macroscopic_velocity, axis=2) # matrix of |u|^2
-max_mach = (np.amax(macro_norm)/SQUARED_SOUND_SPEED)**(0.5) # maximum Mach number
+        # initial condition: F'(b) = 0
+        A[-1, -2:] = np.array([-1, 1])
+        B[-1] = 0
 
-targets = np.zeros((*n,9,3), dtype='int64')
-electromagnetic_field = np.zeros_like(macroscopic_velocity)
-KQ = (.05, .1) # field intensity not regarding position, it has to depend on elements matrix size in order to maintain low Mach number
+        for i in range(1, N):
+            A[i, i-1:i+2] = np.array([n**2, g[i]-2*n**2, n**2])
+            B[i] = -S[i]
 
-# preparating matrices for streaming targeted lattices and electromagnetic fields
-for i in range(n[0]):
-    for j in range(n[1]):
-        # distances from fields
-        delta_left = j+1
-        delta_right = n[1]-j
-        delta_up = i+1
-        delta_down = n[0]-i
+        F_np = np.linalg.solve(A,B)
 
-        # field intensity regarding position
-        electromagnetic_field[i,j] = np.array((KQ[0]*(1/(delta_left**2) - 1/(delta_right**2)), KQ[1]*(1/(delta_down**2) - 1/(delta_up**2))))
+    sq_F = np.pow(F_np, 2) # squared values for probability density
+    sq_F /= np.sum(sq_F) # normalization
+    return sq_F
 
-        for c in range(9):
-            target = np.array([i-VELOCITIES[c,1], j+VELOCITIES[c,0], c]) # next lattice, vertical has to be inverted because matrix indexing differs from cartesian indexing (above means line before)
-
-            # periodic boundary condition
-            if target[0] < 0: target[0] = n[0]-1
-            elif target[0] > n[0]-1: target[0] = 0
-            if target[1] < 0: target[1] = n[1]-1
-            elif target[1] > n[1]-1: target[1] = 0
-
-            targets[i,j,c] = target
-
-def collide():
-    global updated_elements
-    dotted_fv = np.einsum('ijk,lk->ijl', macroscopic_velocity, VELOCITIES) # matrix of c dot u
-
-    # Maxwell-Boltzmann distribution (TODO: replace it with Bose-Einstein distribution)
-    taylor = 1 + dotted_fv/SQUARED_SOUND_SPEED + (dotted_fv**2)/(2*(SQUARED_SOUND_SPEED**2)) - (macro_norm/(2*SQUARED_SOUND_SPEED))[:,:, np.newaxis]
-    feq = WEIGHTS*taylor*density[:,:,np.newaxis] # equilibrium function
-    updated_elements = (1-OMEGA)*elements + OMEGA*feq # BGK approximation
-
-def stream(): 
-    # scattering new distributions to targeted lattices
-    elements[targets[...,0], targets[...,1], targets[...,2]] = updated_elements
-
-def measure():
-    global density, show_density, macroscopic_velocity, macro_norm, max_mach, is_fluid
-
-    elements[~is_fluid] = [0,0,0,0,0,0,0,0,0] # removing particles through evaporative cooling
-
-    density = np.sum(elements, axis=2) # summatory over f_i
-    macroscopic_velocity = (np.einsum('ijk,kl->ijl', elements, VELOCITIES) + electromagnetic_field)/density[:,:,np.newaxis] # summatory over f_i*c_i    
-    macroscopic_velocity = .995*macroscopic_velocity # laser cooling deacceleration (TODO: calculate arbitrary deacceleration)
-
-    macro_norm = np.sum(macroscopic_velocity*macroscopic_velocity, axis=2) # matrix of |u|^2
-    max_mach = (np.amax(macro_norm)/SQUARED_SOUND_SPEED)**(0.5) # maximum Mach number
-
-    is_fluid.fill(True) # reset boolean matrix so empty lattices can be filled again
-
-# heatmap for density
-plt.ion()
+# graph
 fig, ax = plt.subplots()
-img = plt.imshow(density, cmap='plasma')
-plt.colorbar(img)
+data = f()
+line, = ax.plot(np.arange(a,b+dx,dx), data)
+fig.subplots_adjust(bottom=.35)
 
-def iterate():
-    for _ in range(ITERATIONS):
-        if (_+1) % 10 == 0:
-            # useful simulation info displayed every 10 iterations
-            print(f'total density: {np.sum(density)}')
-            print(f'max and mean squared flow speed: {np.amax(macro_norm)} | {np.mean(macro_norm)}')
-            print(f'max Mach number: {max_mach}')
+# sliders for (arbitraries, for the time being) parameters
+laser_slider = plt.Slider(ax=fig.add_axes((0.25, 0.1, 0.65, 0.03)),label='laser_intensity',valmin=0.1,valmax=10,valinit=1)
+alpha_slider = plt.Slider(ax=fig.add_axes((0.25, 0.15, 0.65, 0.03)),label='alpha',valmin=0.1,valmax=10,valinit=1)
+chemp_slider = plt.Slider(ax=fig.add_axes((0.25, 0.2, 0.65, 0.03)),label='chemical_potential',valmin=0.1,valmax=10,valinit=1)
+pi_slider = plt.Slider(ax=fig.add_axes((0.25, 0.25, 0.65, 0.03)),label='particle_interation',valmin=0.1,valmax=10,valinit=1)
 
-        collide()
-        stream()
-        measure()
+def update(val):
+    # update graph with sliders values
+    data =f(laser_slider.val,alpha_slider.val,chemp_slider.val,pi_slider.val)
+    ax.set_ylim(np.min(data), np.max(data))
+    line.set_ydata(data)
+    fig.canvas.draw_idle()
 
-        # updating heatmap
-        img.set_data(density)
-        img.set_clim(vmin=0, vmax=np.amax(density))
-        plt.draw()
-        plt.pause(0.01)
+laser_slider.on_changed(update)
+alpha_slider.on_changed(update)
+chemp_slider.on_changed(update)
+pi_slider.on_changed(update)
 
-iterate()
-t1 = datetime.datetime.now() # recording ending time for optimization comparison
-
-plt.ioff()
 plt.show()
-
-print(t1-t0) # simulation execution time
